@@ -253,12 +253,12 @@ uint32_t ulProgramModeExitTime = 0;
 
 // Index into the EEPROM Storage assuming a 0 based array of uint16_t
 // Data to be stored low byte, high byte
-const int EEPROM_INDEX_STEERING_MIN = 0;
-const int EEPROM_INDEX_STEERING_MAX = 1;
-const int EEPROM_INDEX_STEERING_CENTER = 2;
-const int EEPROM_INDEX_THROTTLE_MIN = 3;
-const int EEPROM_INDEX_THROTTLE_MAX = 4;
-const int EEPROM_INDEX_THROTTLE_CENTER = 5;
+#define EEPROM_INDEX_STEERING_MIN 0
+#define EEPROM_INDEX_STEERING_MAX 1
+#define EEPROM_INDEX_STEERING_CENTER 2
+#define EEPROM_INDEX_THROTTLE_MIN 3
+#define EEPROM_INDEX_THROTTLE_MAX 4
+#define EEPROM_INDEX_THROTTLE_CENTER 5
 
 Servo servoThrottle;
 Servo servoSteering;
