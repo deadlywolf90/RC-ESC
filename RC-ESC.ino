@@ -1,5 +1,5 @@
 /////////////////////////////////////////////////////////////////////////////////////
-///           Electronic Stability Control for RC Car v1.0 2016/03/07             ///
+///           Electronic Stability Control for RC Car v1.0 2016/03/26             ///
 /////////////////////////////////////////////////////////////////////////////////////
 /// IMPORTANT NOTICE: THIS PROJECT IS FAR FROM READY, SO USE IT AT YOUR OWN RISK!
 /// This project features an electronic stability control for a 1/10th scale RC car.
@@ -43,7 +43,11 @@
 /// centerpoint (called as yaw).
 /// These are the optimal values, at optimal conditions, no slip, so some tolerance 
 /// is added to tune the sensitivity (this is done by remote control). 
-/// The actual values are measured by the gyroscope/accelerometer.
+/// The actual values are measured by the gyroscope/accelerometer. As for the 
+/// understeer detection, if the acceleration vector points more towards the front of 
+/// the car than calculated, or its sideways absolute value is less than calculated, 
+/// means that the car is negotiating a slighter curve (a bigger radius) than intended
+/// (i.e. it is understeering).
 /// OVERSTEER-CORRECTION: if the program finds that the car rotates around its vertical
 /// axis more than it is supposed to be, that means the car is fishtailing. It stores 
 /// the last steering input before the car started to skid, and adjusts the steering
@@ -139,7 +143,6 @@ const int RC_DIFF = 500; /// = (RC_MAX - RC_MIN)/2
 ///      |
 ///  []--|--[]
 ///
-///
 //////////////////////////////////
 /// Car front wheel maximum turn angles (in radians)
 const float MAX_IN_ANGLE = 0.523598776;
@@ -163,11 +166,12 @@ const int THROTTLE_SENSITIVITY_PIN = 0;
 const int STEERING_SENSITIVITY_PIN = 1;
 const int THROTTLE_DECAY_PIN = 2;
 const int STEERING_DECAY_PIN = 3;
+#define SPEED_SENSOR_PIN 3
 //////////////////////////////////////////////////////////////////
 // DIGITAL PINS
 //////////////////////////////////////////////////////////////////
 const int PROGRAM_PIN = 9;
-const int INFORMATION_INDICATOR_PIN = 13;
+const int INFORMATION_INDICATOR_PIN = 12; /// 13 on my PCB
 const int ERROR_INDICATOR_PIN = 6;
 const int THROTTLE_IN_PIN = 2;
 const int STEERING_IN_PIN = 3;
@@ -175,21 +179,12 @@ const int THROTTLE_OUT_PIN = 8;
 const int STEERING_OUT_PIN = 7;
 const int BRAKELIGHT_PIN = 4;
 
-
 ////////////////////////////////////////////////////////////////////
 /// GYRO PINS and GYRO VARIABLES
 //////////////////////////////////////////////////////////////////
-// class default I2C address is 0x68
-// specific I2C addresses may be passed as a parameter here
-// AD0 low = 0x68 (default for SparkFun breakout and InvenSense evaluation board)
-// AD0 high = 0x69
 MPU6050 mpu;
-//MPU6050 mpu(0x69); // <-- use for AD0 high
 
-// uncomment "OUTPUT_SOMETHING" for enabling output, pls refer to MPU-6050 example:
-//#define OUTPUT_READABLE_WORLDACCEL
-
-const int GYRO_LED_PIN = 12;
+const int GYRO_LED_PIN = 10;
 bool blinkState = false;
 
 // MPU control/status vars
@@ -229,18 +224,28 @@ bool mpuInterrupt = false;
 // as quickly as possible, this ensures that we are always able to receive new signals
 volatile uint16_t unThrottleInShared;
 volatile uint16_t unSteeringInShared;
-volatile float dTrainSpeedShared;
 
 // These are used to record the rising edge of a pulse in the calcInput functions
 // They do not need to be volatile as they are only used in the ISR. If we wanted
 // to refer to these in loop and the ISR then they would need to be declared volatile
 uint32_t ulThrottleStart;
 uint32_t ulSteeringStart;
-uint32_t ulDriveTrainSpeedStart; /// for speed calculation
 
 // time variables;
 uint32_t ulLastThrottleIn;
 uint32_t unRollTime;
+
+/// SPEED SENSING
+bool readFlag = true;
+
+uint32_t whiteStart = 0;
+volatile uint32_t interval;
+uint32_t intervalLoop;
+bool updateFlag = false;
+
+uint32_t lastSpeedUpdateMillis = 0;
+
+bool brake_blocked = false;
 
 #define MODE_FORCEPROGRAM 0
 #define MODE_RUN 1
@@ -277,33 +282,52 @@ float straightSensitivity = 0.1;
 // the avg wheel angle under which we assume straight motion
 // this is to avoid passing a zero to the tangent function ;)
 uint8_t ESC_deadzone = 0.0174532925; /* 2-3 degrees */
-int brake_deadzone = 150;
+int brake_deadzone = 100;
 /// Decision related sensitivity:
-float oversteer_yaw_difference = 1;
-float understeerXdiff = 0.2;
-float understeerYdiff = 0.2;
+float oversteer_yaw_difference = 10;
+float understeerXdiff = 0.4;
+float understeerYdiff = 0.4;
 /// Intervention strength (multi = multiplying; corr = adding/subtracting):
 // 1 = wheels face the pre-skid direction, 
 float oversteer_steering_multi = 1; 
 int oversteer_throttle_corr = -150;
-int understeer_throttle_corr = -250;
+int understeer_throttle_corr = -25;
 int straightline_corr = 30;
+/// Geometry related settings:
+uint8_t wheelCircumference = 200; // in mm, if wheel diameter > 80 change to int
+/// Sensitivity settings' limit will be implemented by the other arduino, if any
 /// End of sensitivity settings ////
+byte engine_throttle_corr;
+/// telemetry data used by loop, but declared outside loop so ET can access it
+volatile float dTrainSpeed = 0;
+uint16_t engineRPM; 
+/// end of telemetry data
 
-
-struct RECEIVE_DATA_STRUCTURE{ /// for setting values of ESC
+struct RECEIVE_SETTINGS_STRUCTURE{ /// for setting values of ESC
   // variables have the same meaning as above
   uint8_t steeringDeadzone;
   uint8_t straightSensitivity;
   uint8_t ESC_deadzone; 
   int brake_deadzone;
+  float oversteer_yaw_difference;
+  float understeerXdiff;
+  float understeerYdiff;
+  float oversteer_steering_multi; 
+  int oversteer_throttle_corr;
+  int understeer_throttle_corr;
+  int straightline_corr;
+  uint8_t wheelCircumference;
+  uint8_t gMode;
+  uint8_t engine_throttle_corr;
 };
 
 struct SEND_DATA_STRUCTURE{ /// for sending telemetry data to other arduino
   uint8_t state;
+  uint8_t gMode;
+  float dTrainSpeed;
 };
 
-RECEIVE_DATA_STRUCTURE rxdata;
+RECEIVE_SETTINGS_STRUCTURE rxdata;
 SEND_DATA_STRUCTURE txdata;
 
 /// States of the car, that have to be adressed
@@ -320,20 +344,25 @@ const int TURN_RIGHT = 2;
 
 uint8_t state = ST_BALANCED;
 
+uint32_t lastWireSend = 0;
+
 void setup()
 {
-  Serial.begin(115200);
+  if (DEBUG) { Serial.begin(115200); }
+  Serial.begin(9600);
 
   pinMode(PROGRAM_PIN, INPUT);
   pinMode(INFORMATION_INDICATOR_PIN, OUTPUT);
   pinMode(ERROR_INDICATOR_PIN, OUTPUT);
+  pinMode(BRAKELIGHT_PIN, OUTPUT);
 
   // if pin 2 and 3 (int pin 0 and 1) change calThrottle/Steering is run
   enableInterrupt(2 /* INT0 = THROTTLE_IN_PIN */, calcThrottle, CHANGE);
   enableInterrupt(3 /* INT1 = STEERING_IN_PIN */, calcSteering, CHANGE);
+  enableInterrupt(A3, calcSpeed, CHANGE);
 
   // reads potentiometers to get ESC settings (later will be input by wireless)
-  readAnalogSettings();
+  readSettings();
 
   servoThrottle.attach(THROTTLE_OUT_PIN);
   servoSteering.attach(STEERING_OUT_PIN);
@@ -342,20 +371,21 @@ void setup()
   if (false == readSettingsFromEEPROM())
   {
     gMode = MODE_FORCEPROGRAM;
-  }
-
+  } 
+  
+  Wire.onReceive(receiveEvent);
   //////////////////////////////////////////////////////////
   //// GYRO SETUP
   //////////////////////////////////////////////////////////
   // join I2C bus (I2Cdev library doesn't do this automatically)
   #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-    Wire.begin(2);
+    Wire.begin(0x8);
     TWBR = 24; // 400kHz I2C clock (200kHz if CPU is 8MHz)
   #elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
     Fastwire::setup(400, true);
   #endif  
   
-  while (!Serial); // wait for Leonardo enumeration, others continue immediately
+  if (DEBUG) {while (!Serial);} // wait for Leonardo enumeration, others continue immediately
 
   // initialize device
   DEBUG_PRINTLN(F("Initializing I2C devices..."));
@@ -364,12 +394,6 @@ void setup()
   // verify connection
   DEBUG_PRINTLN(F("Testing device connections..."));
   DEBUG_PRINTLN(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
-
-  /* // wait for ready
-    DEBUG_PRINTLN(F("\nSend any character to begin DMP programming and demo: "));
-    while (Serial.available() && Serial.read()); // empty buffer
-    while (!Serial.available());                 // wait for data
-    while (Serial.available() && Serial.read()); // empty buffer again */
 
   // load and configure the DMP
   DEBUG_PRINTLN(F("Initializing DMP..."));
@@ -391,7 +415,7 @@ void setup()
 
     // enable Arduino interrupt detection
     DEBUG_PRINTLN(F("Enabling interrupt detection (Arduino enableInterrupt on DigitalPin 5)..."));
-    enableInterrupt(5, dmpDataReady, RISING);
+    enableInterrupt(11, dmpDataReady, RISING);
     mpuIntStatus = mpu.getIntStatus();
 
     // set our DMP Ready flag so the main loop() function knows it's okay to use it
@@ -412,11 +436,10 @@ void setup()
 
   // configure LED for output
   pinMode(GYRO_LED_PIN, OUTPUT);
-  //// GYRO SETUP END
+  //// GYRO SETUP END 
 
   easyTransferIn.begin(details(rxdata), &Wire);
   easyTransferOut.begin(details(txdata), &Wire);
-  Wire.onReceive(receiveEvent);
   
   // time of the last throttle input to calculate failsafe
   ulLastThrottleIn = millis();
@@ -430,8 +453,8 @@ void loop()
   static uint16_t unThrottleIn;
   static uint16_t unSteeringIn;
   /// we need different output, so we can always calculate with the drivers intention
-  static uint16_t unThrottleOut;/* = RC_NEUTRAL;*/
-  static uint16_t unSteeringOut;/* = RC_NEUTRAL;*/
+  static uint16_t unThrottleOut;
+  static uint16_t unSteeringOut;
   static uint16_t unLastSteeringOut;
   // local copy of update flags
   static uint8_t bUpdateFlags;
@@ -442,7 +465,6 @@ void loop()
   static float wAngleFR;
   static uint8_t turn;
   /// v1.0 Only drivetrain speed, no wheelspeed (1 brake for the 4 wheels, )
-  static float dTrainSpeed = 1;
   /// Intended course of the car NOTE: int prefix relates to intended not integer
   static float dSteering = 0; /// difference from center in micros
   static float intSpeedX;
@@ -469,6 +491,7 @@ void loop()
   static float intAccRAy;
   static float normAccelerationX;
   static float normAccelerationY;
+  /// timestamp for calculated speed vectors
   static uint32_t ulSpeedMicros;
   static uint32_t ulLastSpeedMicros;
   /// Gyro input:
@@ -482,12 +505,15 @@ void loop()
   static uint32_t ulYawVMillis;
   static uint32_t ulLastYawAngleMillis;
   static uint32_t ulLastYawVMillis;
-  static float accelerationZgrav; // z-axis acc. with gravity
+  static float accelerationZgrav; // z-axis acc. with gravity (to detect roll)
   static float accelerationZ;
   static float accelerationY;
   static float accelerationX;
   uint32_t ulMillis = millis();
-
+  static int ABS_corr;
+  static uint32_t lastSpeedInterval;
+  static uint16_t blockedThrottleOut;
+  
   // check shared update flags to see if any channels have a new signal
   if (bUpdateFlagsShared)
   {
@@ -514,9 +540,11 @@ void loop()
     if (state == ST_BALANCED)
     {
       unSteeringOut = unSteeringIn;
+      if (!brake_blocked) { unThrottleOut = unThrottleIn; }
     }
-    
-    /// TODO: Get drivetrain speed if it changes
+
+    /// TODO: rename these to more recognizable
+    intervalLoop = interval;
 
     // clear shared copy of updated flags as we have already taken the updates
     // we still have a local copy if we need to use it in bUpdateFlags
@@ -527,7 +555,7 @@ void loop()
     // service routines own these and could update them at any time. During the update, the
     // shared copies may contain junk. Luckily we have our local copies to work with :-)
 
-  }
+  }  
 
   ////////////////////////////////////////////////////////////////////////
   //// READING GYRO VALUES
@@ -536,6 +564,7 @@ void loop()
   // only read if there was an MPU interrupt or extra packet(s) available
   if (dmpReady && mpuInterrupt)
   {
+    Wire.beginTransmission(0x68);
     // reset interrupt flag and get INT_STATUS byte
     mpuInterrupt = false;
     mpuIntStatus = mpu.getIntStatus();
@@ -564,43 +593,43 @@ void loop()
       // (this lets us immediately read more without waiting for an interrupt)
       fifoCount -= packetSize;
 
-      if (true)
-      {
-        mpu.dmpGetQuaternion(&q, fifoBuffer);
-        mpu.dmpGetAccel(&aa, fifoBuffer);
-        mpu.dmpGetGravity(&gravity, &q);
-        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-        yawAngle = ypr[0];
-        ulYawAngleMillis = millis();
-        /// Get real acceleration, adjusted to remove gravity
-        mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-        accelerationZ = aaReal.z;
-        accelerationY = aaReal.y;
-        accelerationX = aaReal.x;
-        accelerationZgrav = aa.z;
-        accelerationZ = accelerationZ / 8192 * 10;
-        accelerationY = accelerationY / 8192 * 10;
-        accelerationX = accelerationX / 8192 * 10;
-        accelerationZgrav = accelerationZgrav / 8192 * 10;
-     /* DEBUG_PRINT("areal\t");
-        DEBUG_PRINT(accelerationX);
-        DEBUG_PRINT("\t");
-        DEBUG_PRINT(accelerationY);
-        DEBUG_PRINT("\t");
-        DEBUG_PRINTLN(accelerationZgrav);
-    /*  DEBUG_PRINT(normAccelerationX);
-        DEBUG_PRINT("\t");
-        DEBUG_PRINTLN(normAccelerationY);*/
-      }
+      
+      mpu.dmpGetQuaternion(&q, fifoBuffer);
+      mpu.dmpGetAccel(&aa, fifoBuffer);
+      mpu.dmpGetGravity(&gravity, &q);
+      mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+      yawAngle = ypr[0];
+      ulYawAngleMillis = millis();
+      /// Get real acceleration, adjusted to remove gravity
+      mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+      accelerationZ = aaReal.z;
+      accelerationY = aaReal.y;
+      accelerationX = aaReal.x;
+      accelerationZgrav = aa.z;
+      accelerationZ = accelerationZ / 8192 * 10;
+      accelerationY = accelerationY / 8192 * 10;
+      accelerationX = accelerationX / 8192 * 10;
+      accelerationZgrav = accelerationZgrav / 8192 * 10;
+      DEBUG_PRINT("areal\t");
+      DEBUG_PRINT(accelerationX);
+      DEBUG_PRINT("\t");
+      DEBUG_PRINT(accelerationY);
+      DEBUG_PRINT("\t");
+      DEBUG_PRINTLN(accelerationZgrav);
+      DEBUG_PRINT(normAccelerationX);
+      DEBUG_PRINT("\t");
+      DEBUG_PRINTLN(normAccelerationY);
+      
       // blink LED to indicate activity
       blinkState = true;
+      Wire.endTransmission(true);
     }
   }
   ////////////////////////////////////////////////////////////////////////
   //// ENDOF READING GYRO VALUES
   ////////////////////////////////////////////////////////////////////////
 
-  // program pin should be pulled to ground through a resistor to activate
+  // program pin should be pulled to ground through a resistor to activate.
   // when program button is pushed:
   if (false == digitalRead(PROGRAM_PIN) && gMode != MODE_FULL_PROGRAM)
   {
@@ -637,7 +666,7 @@ void loop()
     }
 
     // Take new sensitivity and decay readings for quick program and full program modes here
-    readAnalogSettings();
+    readSettings();
   }
 
   if (gMode == MODE_FULL_PROGRAM)
@@ -684,6 +713,24 @@ void loop()
     {
       /// Here is what the serious shit goes down:
       /// Calculate drivers intention (or the ESCs):
+      if (updateFlag)
+      {
+        updateFlag = false;
+        brake_blocked = false;
+        
+        float intervalMillis = intervalLoop / 1000;
+        float RPms = 1 / intervalMillis;
+        float RPS = RPms * 1000 / 9;
+        dTrainSpeed = RPS * (float) wheelCircumference / 1000; 
+
+        lastSpeedInterval = intervalMillis;
+        lastSpeedUpdateMillis = ulMillis;        
+      }  
+      else if ((ulMillis - lastSpeedUpdateMillis) > 167)
+      {
+        dTrainSpeed = 0;    
+        brake_blocked = false;
+      }    
       /// TODO: Check if casting the values to float in the calculation is sufficient
       float neutral = unSteeringCenter;
       float steering = unSteeringOut;
@@ -869,7 +916,7 @@ void loop()
         unLastBalancedSt = unSteeringOut;
         /// What to do with throttle:
         /// if there is no other issue:
-        unThrottleOut = unThrottleIn;
+        if (!brake_blocked) { unThrottleOut = unThrottleIn; }
       }
       else if (state == ST_OVERSTEER)
       {
@@ -894,8 +941,8 @@ void loop()
       else if (state == ST_UNDERSTEER)
       {
         /// throttleMax means full braking on this car
-        unThrottleOut = unThrottleIn - understeer_throttle_corr;
-        unThrottleOut = constrain(unThrottleOut, RC_MIN, RC_MAX);
+        unThrottleOut = unThrottleOut - understeer_throttle_corr;
+        unThrottleOut = constrain(unThrottleOut, unThrottleMin, unThrottleMax);
         unSteeringOut = unSteeringIn;
       }
       else if (state == ST_SPINNING)
@@ -909,30 +956,36 @@ void loop()
         unThrottleOut = constrain(unThrottleOut, RC_MIN, RC_MAX);
         /// TODO: tell the other arduino to stop keeping the engine running
       }
-
-      if (unThrottleIn > (unThrottleCenter + brake_deadzone)) /// i.e we are braking
+      
+      if (unThrottleOut > (unThrottleCenter + brake_deadzone)) /// i.e we are braking
       {
-        digitalWrite(BRAKELIGHT_PIN, LOW);
+        if ((ulMillis - lastSpeedUpdateMillis) > lastSpeedInterval)
+        {
+          brake_blocked = true;
+          blockedThrottleOut = unThrottleOut;
+        }
+        if (brake_blocked)
+        {
+          ABS_corr += 10;
+          unThrottleOut = blockedThrottleOut - ABS_corr;
+          unThrottleOut = constrain(unThrottleOut, unThrottleCenter + brake_deadzone, unThrottleMax); 
+        }
+        else
+        {
+          ABS_corr = 0;
+        }
+        digitalWrite(BRAKELIGHT_PIN, LOW);        
       }
       else /// we are not braking
       {
         digitalWrite(BRAKELIGHT_PIN, HIGH);
       }
       
-      // Here it only intervenes, if there is a new value, not a good idea I think
       // Checking for a new value can be a good idea
       if (bUpdateFlags & THROTTLE_FLAG)
       {
         ulLastThrottleIn = ulMillis;
-
-        // A good idea would be to check the before and after value,
-        // if they are not equal we are receiving out of range signals
-        // this could be an error, interference or a transmitter setting change
-        // in any case its a good idea to at least flag it to the user somehow
-        
-
       }
-
       if (bUpdateFlags & STEERING_FLAG)
       {        
         
@@ -945,7 +998,12 @@ void loop()
       intLastSpeedX = intSpeedX;
       intLastSpeedY = intSpeedY;
       ulLastSpeedMicros = ulSpeedMicros;
-      unLastSteeringOut = unSteeringOut;
+      unLastSteeringOut = unSteeringOut;            
+    }    
+    if (easyTransferIn.receiveData())
+    {
+      gMode = rxdata.gMode;
+      engine_throttle_corr = rxdata.engine_throttle_corr;
     }
   }
   else if (gMode == MODE_ERROR)
@@ -970,7 +1028,7 @@ void loop()
 
   if (state == ST_OVERSTEER)
   {
-    // yellow:
+    // yel0:
     digitalWrite(ERROR_INDICATOR_PIN, HIGH);    
     digitalWrite(INFORMATION_INDICATOR_PIN, HIGH);
     digitalWrite(GYRO_LED_PIN, LOW);
@@ -993,12 +1051,22 @@ void loop()
   {
     animateIndicatorsAccordingToMode(gMode, ulMillis);
   }
+  
+  txdata.state = state;
+  txdata.gMode = gMode;
+  txdata.dTrainSpeed = dTrainSpeed;
+
+  easyTransferOut.sendData(0x9);
 }
 
 void animateIndicatorsAccordingToMode(uint8_t gMode, uint32_t ulMillis)
 {
   static uint32_t ulLastUpdateMillis;
   static boolean bAlternate;
+  byte value = 0;
+
+  if (bAlternate) { value = 100; }
+  else { value = 0; }
 
   if (ulMillis > (ulLastUpdateMillis + 1000))
   {
@@ -1061,6 +1129,7 @@ void calcThrottle()
 
 void calcSteering()
 {
+  /// TODO: try digitalRead() to get cross-chip compatibility
   if (PIND & 8)
   {
     ulSteeringStart = micros();
@@ -1069,7 +1138,26 @@ void calcSteering()
   {
     unSteeringInShared = (uint16_t)(micros() - ulSteeringStart);
     bUpdateFlagsShared |= STEERING_FLAG;
+  }  
+}
+
+void calcSpeed()
+{
+  bool readSensor = digitalRead(A3);
+  if(readSensor) // white
+  {
+    if (readFlag)
+    {
+      interval = micros() - whiteStart;
+      whiteStart = micros();
+      readFlag = false;
+      updateFlag = true;
+    }    
   }
+  else // black
+  {
+    readFlag = true;
+  }  
 }
 
 uint8_t readSettingsFromEEPROM()
@@ -1159,7 +1247,7 @@ void writeChannelSetting(uint8_t nIndex, uint16_t unSetting)
   EEPROM.write((nIndex * sizeof(uint16_t)) + 1, highByte(unSetting));
 }
 
-void readAnalogSettings()
+void readSettings()
 {
 
 }
@@ -1168,4 +1256,3 @@ void receiveEvent(int howMany)
 {
   
 }
-
