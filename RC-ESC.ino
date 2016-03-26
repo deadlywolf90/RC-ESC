@@ -47,7 +47,11 @@
 /// understeer detection, if the acceleration vector points more towards the front of 
 /// the car than calculated, or its sideways absolute value is less than calculated, 
 /// means that the car is negotiating a slighter curve (a bigger radius) than intended
-/// (i.e. it is understeering).
+/// (i.e. it is understeering). As for the oversteer detection, if there is more yaw, 
+/// (i.e the car rotates around its center more) than expected, it means, that the rear
+/// end of the car has slipped out from the curve (fishtailed). Also in extremely rare
+/// cases similar slip can occur at the front, but the response is essentially the
+/// same for both cases. 
 /// OVERSTEER-CORRECTION: if the program finds that the car rotates around its vertical
 /// axis more than it is supposed to be, that means the car is fishtailing. It stores 
 /// the last steering input before the car started to skid, and adjusts the steering
