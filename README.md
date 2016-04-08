@@ -2,6 +2,7 @@
 
 # Electronic Stability Control for RC Cars
 Project webpage: http://deadlywolf90.github.io/RC-ESC/
+
 v1.0 2016/03/26             
 
 IMPORTANT NOTICE: THIS PROJECT IS FAR FROM READY, SO USE IT AT YOUR OWN RISK! This project features an electronic stability control for a 1/10th scale RC car. The targetted car is a nitro-powered RC-car, but any 1/10th scale RC car is compatible with the project that has a throttle and a steering servo. The setup consists of two Arduino Nano-compatible boards on the car, an MPU-6050 breakout board (GY-521), a DPDT-relay as a safety switch, a QRD1114 infrared LED and phototransistor, as speed sensor, and an RGB-LED for feedback. For remotely changing settings, the in-car setup is equipped with an NRF24L01 radio. The remote control is a third arduino nano, connected to an LCD screen, an encoder and a similar NRF24L01 radio, providing two-way communication with the car. The rest of the components and features are optional. These include an LM338- based glow plug driver which is yet to be tested. This will rely on a thermistor or an LM335 IC and a crankshaft RPM sensor. As of 20160307 I am waiting for some parts to test the whole circuit, the ESC is hooked up to the car, with the gyro and I am currently working on the transmission of sensitivity settings along the arduinos, and constantly cleaning up the code. The circuit is more or less designed, I want to test everything before printing the circuit on a PCB
