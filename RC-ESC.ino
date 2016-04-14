@@ -149,8 +149,8 @@ const int RC_DIFF = 500; /// = (RC_MAX - RC_MIN)/2
 ///
 //////////////////////////////////
 /// Car front wheel maximum turn angles (in radians)
-const float MAX_IN_ANGLE = 0.523598776;
-const float MAX_OUT_ANGLE = 0.34906585;
+const float MAX_IN_ANGLE = 0.401425728;
+const float MAX_OUT_ANGLE = 0.261799388;
 const float WHEELBASE = 0.26;
 
 uint16_t unSteeringMin = RC_MIN;
@@ -249,6 +249,12 @@ bool updateFlag = false;
 
 uint32_t lastSpeedUpdateMillis = 0;
 
+uint32_t lastWireIn = 0;
+bool programPrepared = false;
+bool programRequested = false;
+bool programReceived = false;
+bool receivedSg = false;
+
 bool brake_blocked = false;
 
 #define MODE_FORCEPROGRAM 0
@@ -256,6 +262,7 @@ bool brake_blocked = false;
 #define MODE_QUICK_PROGRAM 2
 #define MODE_FULL_PROGRAM 3
 #define MODE_ERROR 4
+#define MODE_REMOTE_PROGRAM 5
 
 uint8_t gMode = MODE_RUN;
 uint32_t ulProgramModeExitTime = 0;
@@ -285,10 +292,11 @@ uint8_t steeringDeadzone = 15;
 float straightSensitivity = 0.1;
 // the avg wheel angle under which we assume straight motion
 // this is to avoid passing a zero to the tangent function ;)
-uint8_t ESC_deadzone = 0.0174532925; /* 2-3 degrees */
+float ESC_deadzone = 0.0174532925; /* 2-3 degrees */
 int brake_deadzone = 100;
 /// Decision related sensitivity:
-float oversteer_yaw_difference = 10;
+float oversteer_yaw_difference = 2;
+float oversteer_yaw_release = 2;
 float understeerXdiff = 0.4;
 float understeerYdiff = 0.4;
 /// Intervention strength (multi = multiplying; corr = adding/subtracting):
@@ -301,7 +309,7 @@ int straightline_corr = 30;
 uint8_t wheelCircumference = 200; // in mm, if wheel diameter > 80 change to int
 /// Sensitivity settings' limit will be implemented by the other arduino, if any
 /// End of sensitivity settings ////
-byte engine_throttle_corr;
+byte engine_throttle_corr = 0;
 /// telemetry data used by loop, but declared outside loop so ET can access it
 volatile float dTrainSpeed = 0;
 uint16_t engineRPM; 
@@ -310,10 +318,11 @@ uint16_t engineRPM;
 struct RECEIVE_SETTINGS_STRUCTURE{ /// for setting values of ESC
   // variables have the same meaning as above
   uint8_t steeringDeadzone;
-  uint8_t straightSensitivity;
-  uint8_t ESC_deadzone; 
+  float straightSensitivity;
+  float ESC_deadzone; 
   int brake_deadzone;
   float oversteer_yaw_difference;
+  float oversteer_yaw_release;
   float understeerXdiff;
   float understeerYdiff;
   float oversteer_steering_multi; 
@@ -342,9 +351,14 @@ const int ST_SLIP = 3;
 const int ST_SPINNING = 4;
 const int ST_ROLLED = 5;
 
-const int TURN_NONE = 0;
-const int TURN_LEFT = 1;
-const int TURN_RIGHT = 2;
+const int8_t TURN_NONE = 0;
+const int8_t TURN_LEFT = 1;
+const int8_t TURN_RIGHT = 2;
+
+/// used to detect oversteer correction
+const int8_t OST_LEFT = -1;
+const int8_t OST_NONE = 0;
+const int8_t OST_RIGHT = 1;
 
 uint8_t state = ST_BALANCED;
 
@@ -353,8 +367,7 @@ uint32_t lastWireSend = 0;
 void setup()
 {
   if (DEBUG) { Serial.begin(115200); }
-  Serial.begin(9600);
-
+  
   pinMode(PROGRAM_PIN, INPUT);
   pinMode(INFORMATION_INDICATOR_PIN, OUTPUT);
   pinMode(ERROR_INDICATOR_PIN, OUTPUT);
@@ -376,14 +389,15 @@ void setup()
   {
     gMode = MODE_FORCEPROGRAM;
   } 
+    
+  // Wire.onReceive(receiveCommand);
   
-  Wire.onReceive(receiveEvent);
   //////////////////////////////////////////////////////////
   //// GYRO SETUP
   //////////////////////////////////////////////////////////
   // join I2C bus (I2Cdev library doesn't do this automatically)
   #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-    Wire.begin(0x8);
+    Wire.begin(0xA2);
     TWBR = 24; // 400kHz I2C clock (200kHz if CPU is 8MHz)
   #elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
     Fastwire::setup(400, true);
@@ -467,7 +481,7 @@ void loop()
   /// Wheel Angles:
   static float wAngleFL;
   static float wAngleFR;
-  static uint8_t turn;
+  static int8_t turn;
   /// v1.0 Only drivetrain speed, no wheelspeed (1 brake for the 4 wheels, )
   /// Intended course of the car NOTE: int prefix relates to intended not integer
   static float dSteering = 0; /// difference from center in micros
@@ -517,6 +531,8 @@ void loop()
   static int ABS_corr;
   static uint32_t lastSpeedInterval;
   static uint16_t blockedThrottleOut;
+  static int8_t oversteer_direction;
+  static int8_t oversteer_last_direction;
   
   // check shared update flags to see if any channels have a new signal
   if (bUpdateFlagsShared)
@@ -644,6 +660,9 @@ void loop()
     digitalWrite(INFORMATION_INDICATOR_PIN, LOW);
     digitalWrite(ERROR_INDICATOR_PIN, LOW);
 
+    unThrottleCenter = unThrottleIn;
+    unSteeringCenter = unSteeringIn;
+
     // wait two seconds and test program pin again, if pin if still held low, enter full program mode
     // otherwise read sensitivity pots and return to run mode with new sensitivity readings.
     delay(2000);
@@ -724,7 +743,7 @@ void loop()
         
         float intervalMillis = intervalLoop / 1000;
         float RPms = 1 / intervalMillis;
-        float RPS = RPms * 1000 / 9;
+        float RPS = RPms * 1000 / 11;
         dTrainSpeed = RPS * (float) wheelCircumference / 1000; 
 
         lastSpeedInterval = intervalMillis;
@@ -864,21 +883,38 @@ void loop()
       }
 
       bool unstable = false;
-      /// TODO: condition for speed as well
-      if (abs(accelerationX) < (abs(normAccelerationX) - understeerXdiff) || accelerationY > (normAccelerationY + understeerYdiff))
-      { // i.e. if acceleration is smaller than normal or
-        // acceleration points more to the front of the car than calculated
-        if (turn != TURN_NONE)
-        {
-          state = ST_UNDERSTEER;
-          unstable = true;
-        }
-      }
-      
-      if (abs(yawA) > (abs(normYaw) + oversteer_yaw_difference))
+      if (state == ST_OVERSTEER) { unstable = true; }
+      if (true)  /// TODO: condition for speed 
       {
-        state = ST_OVERSTEER;
-        unstable = true;
+        if (abs(accelerationX) < (abs(normAccelerationX) - understeerXdiff) || accelerationY > (normAccelerationY + understeerYdiff))
+        { // i.e. if acceleration is smaller than normal or
+          // acceleration points more to the front of the car than calculated
+          if (turn != TURN_NONE)
+          {
+            state = ST_UNDERSTEER;
+            unstable = true;
+          }
+        }
+        
+        if (abs(yawA) > (abs(normYaw) + oversteer_yaw_difference))
+        {
+          state = ST_OVERSTEER;
+          unstable = true;
+          if (yawA > 0)
+          {
+            oversteer_direction = OST_RIGHT;
+          }
+          if (yawA < 0)
+          {
+            oversteer_direction = OST_LEFT;
+          }
+        }
+        if (yawA * oversteer_last_direction < 0 && abs(yawA) > oversteer_yaw_release)
+        {
+          unstable = false;
+          oversteer_direction = OST_NONE;
+        }
+        oversteer_last_direction = oversteer_direction;
       }
       
       if (!unstable)
@@ -921,6 +957,7 @@ void loop()
         /// What to do with throttle:
         /// if there is no other issue:
         if (!brake_blocked) { unThrottleOut = unThrottleIn; }
+        unThrottleOut -= engine_throttle_corr;
       }
       else if (state == ST_OVERSTEER)
       {
@@ -965,7 +1002,7 @@ void loop()
       {
         if ((ulMillis - lastSpeedUpdateMillis) > lastSpeedInterval)
         {
-          brake_blocked = true;
+          if (dTrainSpeed > 0) { brake_blocked = true; }
           blockedThrottleOut = unThrottleOut;
         }
         if (brake_blocked)
@@ -1002,13 +1039,26 @@ void loop()
       intLastSpeedX = intSpeedX;
       intLastSpeedY = intSpeedY;
       ulLastSpeedMicros = ulSpeedMicros;
-      unLastSteeringOut = unSteeringOut;            
+      unLastSteeringOut = unSteeringOut; 
+
+      byte programming = 0;
+      if (ulMillis > lastWireIn + 2000)
+      {
+        Wire.requestFrom(0xA3, 2);
+        while (Wire.available() > 1)
+        {
+          programming = Wire.read();
+          DEBUG_PRINTLN(programming);
+        }
+        if (programming == 1)
+        {
+          gMode = MODE_REMOTE_PROGRAM;
+          DEBUG_PRINTLN("Progging requested by radio");
+        }
+        lastWireIn = ulMillis;
+      }
     }    
-    if (easyTransferIn.receiveData())
-    {
-      gMode = rxdata.gMode;
-      engine_throttle_corr = rxdata.engine_throttle_corr;
-    }
+    
   }
   else if (gMode == MODE_ERROR)
   {
@@ -1023,6 +1073,62 @@ void loop()
       unSteeringIn = constrain(unSteeringIn, unSteeringMin, unSteeringMax);
     }
   }
+  else if (gMode == MODE_REMOTE_PROGRAM)
+  {
+    if (!programPrepared)
+    {    
+      txdata.state = state;
+      txdata.gMode = gMode;
+      txdata.dTrainSpeed = dTrainSpeed;
+      
+      easyTransferOut.sendData(0xA3);      
+      programPrepared = true;
+    }   
+    else if (!programReceived)
+    {  
+      byte requestLength = sizeof(rxdata) + 4;
+      Wire.requestFrom(0xA3, requestLength);
+      if (easyTransferIn.receiveData())    
+      {
+        Wire.releaseBus(); /// Need this? (= twi_releaseBus)
+        steeringDeadzone = rxdata.steeringDeadzone; 
+        straightSensitivity = rxdata.straightSensitivity;
+        ESC_deadzone = rxdata.ESC_deadzone;  
+        brake_deadzone = rxdata.brake_deadzone; 
+        oversteer_yaw_difference = rxdata.oversteer_yaw_difference;
+        oversteer_yaw_release = rxdata.oversteer_yaw_release;
+        understeerXdiff = rxdata.understeerXdiff;
+        understeerYdiff = rxdata.understeerYdiff;
+        oversteer_steering_multi = rxdata.oversteer_steering_multi; 
+        oversteer_throttle_corr = rxdata.oversteer_throttle_corr;
+        understeer_throttle_corr = rxdata.understeer_throttle_corr;
+        straightline_corr = rxdata.straightline_corr;
+        wheelCircumference = rxdata.wheelCircumference;
+        // gMode = rxdata.gMode;
+        engine_throttle_corr = rxdata.engine_throttle_corr;
+        programReceived = true;
+        if (DEBUG)
+        {
+          Serial.println(steeringDeadzone); 
+          Serial.println(straightSensitivity); 
+          Serial.println(ESC_deadzone); 
+          Serial.println(brake_deadzone);
+          Serial.println(oversteer_yaw_difference); 
+          Serial.println(oversteer_yaw_release); 
+          Serial.println(understeerXdiff); 
+          Serial.println(understeerYdiff); 
+          Serial.println(oversteer_steering_multi); 
+          Serial.println(oversteer_throttle_corr); 
+          Serial.println(understeer_throttle_corr);
+          Serial.println(straightline_corr);
+          Serial.println(wheelCircumference);
+          Serial.println(gMode); 
+          Serial.println(engine_throttle_corr);      
+        }          
+      }             
+    }  
+  }
+  
 
   /// Only set servo output here at the end, so that all modulations can be done first
   servoThrottle.writeMicroseconds(unThrottleOut);
@@ -1055,22 +1161,31 @@ void loop()
   {
     animateIndicatorsAccordingToMode(gMode, ulMillis);
   }
-  
-  txdata.state = state;
-  txdata.gMode = gMode;
-  txdata.dTrainSpeed = dTrainSpeed;
 
-  easyTransferOut.sendData(0x9);
+  if (gMode != MODE_REMOTE_PROGRAM)
+  {    
+    txdata.state = state;
+    txdata.gMode = gMode;
+    txdata.dTrainSpeed = dTrainSpeed;
+    
+    easyTransferOut.sendData(0xA3); 
+  }
+  if (programReceived) // TODO: flash brakelights to indicate ready
+  {
+    DEBUG_PRINTLN("Progged! Yeah!");
+    gMode = MODE_RUN;
+    txdata.gMode = gMode;
+    easyTransferOut.sendData(0xA3);
+    programPrepared = false;
+    programRequested = false;
+    programReceived = false;
+  }
 }
 
 void animateIndicatorsAccordingToMode(uint8_t gMode, uint32_t ulMillis)
 {
   static uint32_t ulLastUpdateMillis;
   static boolean bAlternate;
-  byte value = 0;
-
-  if (bAlternate) { value = 100; }
-  else { value = 0; }
 
   if (ulMillis > (ulLastUpdateMillis + 1000))
   {
@@ -1090,6 +1205,7 @@ void animateIndicatorsAccordingToMode(uint8_t gMode, uint32_t ulMillis)
         digitalWrite(GYRO_LED_PIN, bAlternate);
         break;
       // flash info once a second, turn off error
+      case MODE_REMOTE_PROGRAM:
       case MODE_FULL_PROGRAM:
         digitalWrite(INFORMATION_INDICATOR_PIN, bAlternate);
         digitalWrite(ERROR_INDICATOR_PIN, LOW);
@@ -1152,6 +1268,7 @@ void calcSpeed()
   {
     if (readFlag)
     {
+      if (DEBUG) { tone(A2,440); }
       interval = micros() - whiteStart;
       whiteStart = micros();
       readFlag = false;
@@ -1160,6 +1277,7 @@ void calcSpeed()
   }
   else // black
   {
+    if (DEBUG) { noTone(A2); }
     readFlag = true;
   }  
 }
@@ -1256,7 +1374,12 @@ void readSettings()
 
 }
 
-void receiveEvent(int howMany)
+void receiveCommand(int howMany)
 {
   
+}
+
+void receiveSettings(int howMany)
+{
+ 
 }
