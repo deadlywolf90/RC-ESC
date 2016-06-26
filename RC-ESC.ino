@@ -1,5 +1,5 @@
 /////////////////////////////////////////////////////////////////////////////////////
-///           Electronic Stability Control for RC Car v1.0 2016/04/14             ///
+///           Electronic Stability Control for RC Car v1.0 2016/03/26             ///
 /////////////////////////////////////////////////////////////////////////////////////
 /// IMPORTANT NOTICE: THIS PROJECT IS FAR FROM READY, SO USE IT AT YOUR OWN RISK!
 /// This project features an electronic stability control for a 1/10th scale RC car.
@@ -14,11 +14,10 @@
 /// car. The rest of the components and features are optional. These include an LM338-
 /// based glow plug driver which is yet to be tested. This will rely on a thermistor
 /// or an LM335 IC and a crankshaft RPM sensor.
-/// As of 2016/03/07 I am waiting for some parts to test the whole circuit, the ESC is 
-/// hooked up to the car, with the gyro and I am currently working on the transmission
-/// of sensitivity settings along the arduinos, and constantly cleaning up the code.
-/// The circuit is more or less designed, I want to test everything before printing
-/// the circuit on a PCB
+/// As of 20160415 I have tested the circuit, everything works, I solved the problem 
+/// with the I2C communication, and printed and assembled the pcb. (Picture on the 
+/// webpage) The next step is to program the remote, design a pcb for that as well, 
+/// and go test (a lot). :)
 /////////////////////////////////////////////////////////////////////////////////////
 /// This part contains description of the finished and yet-to-be finished features:
 /// OPERATION: Currently the stability control is achieved only by throttle and 
