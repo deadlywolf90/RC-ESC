@@ -1,6 +1,6 @@
 /// RC-ESC RADIO
 /////////////////////////////////////////////////////////////////////////////////////
-///           Electronic Stability Control for RC Car v1.0 2016/04/14             ///
+///           Electronic Stability Control for RC Car v1.0 2016/03/26             ///
 /////////////////////////////////////////////////////////////////////////////////////
 /// IMPORTANT NOTICE: THIS PROJECT IS FAR FROM READY, SO USE IT AT YOUR OWN RISK!
 /// Description coming soon...
@@ -12,6 +12,7 @@
 #include <SPI.h>
 
 #include <I2Cdev.h>
+#include <EasyTransfer.h>
 #include <EasyTransferI2C.h>
 // Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
 // is used in I2Cdev.h
@@ -25,7 +26,7 @@
 ///   PIN ASSIGNMENTS !! NEED SETTING !!
 ////////////////////////////////////////
 ///   ANALOG
-#define BATTERY_PIN 5
+#define BATTERY_PIN 6
 #define ENGINE_TEMP_PIN 0
 #define SAFETY_RELAY_PIN 4
 ///   DIGITAL
@@ -34,6 +35,8 @@
 #define GLOW_LED_PIN A2
 #define SAFETY_RELAY_LED_PIN 3
 #define MANUAL_GLOW_PIN 2
+#define NEON_PIN 10
+#define LIGHT_PIN 9
 /// endof PIN ASSIGNMENTS
 
 #define MODE_BOOT 0
@@ -75,6 +78,7 @@ byte progMode = MODE_BOOT;
 byte batteryState = BATTERY_OK;
 
 bool ESCswitch = true;
+bool remoteProgram = false;
 
 bool programming = false;
 bool programSent = false;
@@ -144,21 +148,58 @@ struct RADIO_DATA_OUT {
   float batteryV;
   float engineTemp;
   bool glowActive;
+  bool safetyRelayState;
+  uint8_t progMode;
+  uint8_t radioStatus;
 };
 
-struct RADIO_DATA_IN {
+struct RADIO_DATA_IN_0 {
   bool ESCswitch;
+  bool programming;
+  /// settings:
+  uint8_t steeringDeadzone;
+  float straightSensitivity;
+  float ESC_deadzone; 
+  int brake_deadzone;
+  float oversteer_yaw_difference;
+  float oversteer_yaw_release;
+  uint8_t code;
 };
+
+struct RADIO_DATA_IN_1 {
+  float understeerXdiff;
+  float understeerYdiff;
+  float oversteer_steering_multi; 
+  int oversteer_throttle_corr;
+  int understeer_throttle_corr;
+  int straightline_corr;
+  uint8_t wheelCircumference;
+  uint8_t gMode;
+  uint8_t engine_throttle_corr;
+  uint8_t code;
+};
+
+uint8_t engine_throttle_corr = 0;
 
 RECEIVE_DATA_STRUCTURE rxdata;
 SEND_SETTINGS_STRUCTURE txdata;
 
 RADIO_DATA_OUT radioDataOut;
-RADIO_DATA_IN radioDataIn;
+RADIO_DATA_IN_0 radioDataIn0;
+RADIO_DATA_IN_1 radioDataIn1;
+
+uint8_t radioStatus;
+
+#define R_STAT_READY 0
+#define R_STAT_ACK_0 1
+#define R_STAT_ACK_1 2
+
+#define R_CODE_0 122
+#define R_CODE_1 195
 
 void setup() 
 {    
-  Serial.begin(9600);
+  // Serial.begin(115200);
   Serial.println("Start");
   
   Wire.onReceive(receiveEvent);
@@ -186,11 +227,27 @@ void setup()
   pinMode(ESC_RESET_PIN,OUTPUT);
   pinMode(SAFETY_RELAY_LED_PIN,OUTPUT);
   pinMode(MANUAL_GLOW_PIN,INPUT);
+  pinMode(NEON_PIN,OUTPUT);
+  pinMode(LIGHT_PIN,OUTPUT);
   
   digitalWrite(SAFETY_RELAY_PIN, LOW);
   digitalWrite(ESC_RESET_PIN, HIGH);
   digitalWrite(GLOW_LED_PIN, LOW);
   digitalWrite(SAFETY_RELAY_LED_PIN, LOW);
+
+  /// Just for fun and test:
+  analogWrite(NEON_PIN,0);
+  analogWrite(LIGHT_PIN, 0);
+  delay(1000);
+  for (byte i = 0; i < 255; i++)
+  {
+    analogWrite(NEON_PIN,i);
+    analogWrite(LIGHT_PIN,i);
+    delay(4);
+  }
+  analogWrite(NEON_PIN,255);
+  analogWrite(LIGHT_PIN,255);
+  /// Fun over
   
   easyTransferIn.begin(details(rxdata), &Wire);
   easyTransferOut.begin(details(txdata), &Wire);  
@@ -209,12 +266,12 @@ void setup()
   txdata.straightline_corr = straightline_corr;
   txdata.wheelCircumference = wheelCircumference;
   txdata.gMode = gMode;
-  txdata.engine_throttle_corr = 100;
+  txdata.engine_throttle_corr = engine_throttle_corr;
 
   ESCswitch = true;
+  radioStatus = R_STAT_READY;
 
   progMode = MODE_RUN;
-
 }
 
 void loop() 
@@ -334,28 +391,12 @@ void loop()
       digitalWrite(GLOW_RELAY_PIN,LOW);
       digitalWrite(GLOW_LED_PIN,LOW);
       glowActive = false;
-    } */
+    } */   
     
-    radioDataOut.glowActive = glowActive;
-    /// Do these every 50 ms
-    if (commonMillis - lastRadioOut > 50)
-    {
-      radio.stopListening();    
-      radio.write( &radioDataOut, sizeof(radioDataOut));          
-      radio.startListening();
-      lastRadioOut = commonMillis;
-    }
-
-    if(radio.available())
-    {                                                             
-      while (radio.available()) 
-      {                                  
-        radio.read( &radioDataIn, sizeof(radioDataIn));
-      }  
-      ESCswitch = radioDataIn.ESCswitch;
-    }
     
-    if (commonMillis > (lastWireOutMillis + 15000))
+    
+    
+    if (remoteProgram && radioStatus == R_STAT_ACK_1)
     {
       txdata.steeringDeadzone = steeringDeadzone;
       txdata.straightSensitivity = straightSensitivity;
@@ -371,7 +412,7 @@ void loop()
       txdata.straightline_corr = straightline_corr;
       txdata.wheelCircumference = wheelCircumference;
       txdata.gMode = gMode;
-      txdata.engine_throttle_corr = 200;
+      txdata.engine_throttle_corr = engine_throttle_corr;
       programming = true;
       lastWireOutMillis = commonMillis;
     }
@@ -423,10 +464,12 @@ void loop()
   /* Battery measurement unrelated to modes, but should not happen when glowing,
      because the current draw of the glow plug might drop voltage */
   if (!glowActive && commonMillis - lastBatteryMillis > 500)
-  {
+  {    
     analogRead(BATTERY_PIN);
     batteryV = analogRead(BATTERY_PIN);
-    batteryV = batteryV / 1023 * 10;    
+    float vcc = (float) readVcc() / 1000;
+    batteryV = batteryV / 1023 * vcc * 2;
+    
     radioDataOut.batteryV = batteryV;
     
     if (batteryV < 5.5) /// arduinos switch off at this point... :(
@@ -449,6 +492,97 @@ void loop()
   if (programming)
   {
     progMode = MODE_PROGRAM;
+  }  
+  radioDataOut.progMode = progMode;
+  /// Do these every 50 ms
+  if (commonMillis - lastRadioOut > 50)
+  {
+    /// Set variables:
+    radioDataOut.glowActive = glowActive;
+    radioDataOut.safetyRelayState = digitalRead(SAFETY_RELAY_PIN);
+    radioDataOut.radioStatus = radioStatus;
+    radio.stopListening();    
+    radio.write( &radioDataOut, sizeof(radioDataOut));          
+    radio.startListening();
+    if (radioStatus == R_STAT_ACK_1)
+    {
+      radioStatus = R_STAT_READY;
+    }
+    lastRadioOut = commonMillis;
+  }
+
+  if(radio.available())
+  {        
+    if (radioStatus == R_STAT_READY)
+    {
+      Serial.println("PACKET0?"); 
+      while (radio.available()) 
+      {                                  
+        radio.read( &radioDataIn0, sizeof(radioDataIn0));
+      }            
+      Serial.println(radioDataIn0.code);                                 
+      if (radioDataIn0.code == R_CODE_0)
+      {
+        Serial.println("PACKET0!"); 
+        ESCswitch = radioDataIn0.ESCswitch;      
+        remoteProgram = radioDataIn0.programming;
+        if (remoteProgram)
+        {
+          steeringDeadzone = radioDataIn0.steeringDeadzone; 
+          straightSensitivity = radioDataIn0.straightSensitivity;
+          ESC_deadzone = radioDataIn0.ESC_deadzone;  
+          brake_deadzone = radioDataIn0.brake_deadzone; 
+          oversteer_yaw_difference = radioDataIn0.oversteer_yaw_difference;
+          oversteer_yaw_release = radioDataIn0.oversteer_yaw_release;
+          radioStatus = R_STAT_ACK_0;
+          Serial.println("PACKET0 ACK");          
+        }        
+      }
+    }
+    else if (radioStatus == R_STAT_ACK_0)
+    {
+      Serial.println("PACKET1?"); 
+      while (radio.available()) 
+      {                                  
+        radio.read( &radioDataIn1, sizeof(radioDataIn1));
+      }        
+      Serial.println(radioDataIn1.code);                                          
+      if (radioDataIn1.code == R_CODE_1)
+      {
+        Serial.println("PACKET1!"); 
+        if (remoteProgram)
+        {
+          understeerXdiff = radioDataIn1.understeerXdiff;
+          understeerYdiff = radioDataIn1.understeerYdiff;
+          oversteer_steering_multi = radioDataIn1.oversteer_steering_multi; 
+          oversteer_throttle_corr = radioDataIn1.oversteer_throttle_corr;
+          understeer_throttle_corr = radioDataIn1.understeer_throttle_corr;
+          straightline_corr = radioDataIn1.straightline_corr;
+          wheelCircumference = radioDataIn1.wheelCircumference;
+          // gMode = radioDataIn1.gMode;
+          engine_throttle_corr = radioDataIn1.engine_throttle_corr;
+          radioStatus = R_STAT_ACK_1;
+          Serial.println("PACKET1 ACK");
+          if (true)
+          {
+            Serial.println(steeringDeadzone); 
+            Serial.println(straightSensitivity); 
+            Serial.println(ESC_deadzone); 
+            Serial.println(brake_deadzone);
+            Serial.println(oversteer_yaw_difference); 
+            Serial.println(oversteer_yaw_release); 
+            Serial.println(understeerXdiff); 
+            Serial.println(understeerYdiff); 
+            Serial.println(oversteer_steering_multi); 
+            Serial.println(oversteer_throttle_corr); 
+            Serial.println(understeer_throttle_corr);
+            Serial.println(straightline_corr);
+            Serial.println(wheelCircumference);
+            Serial.println(engine_throttle_corr);
+          }
+        }
+      }
+    }
   }
 }
 
@@ -478,4 +612,31 @@ void requestProgram()
   easyTransferOut.sendDataPerRequest(0xA2);
   programSent = true;
   Wire.onRequest(requestStatus); 
+}
+
+long readVcc() {
+  // Read 1.1V reference against AVcc
+  // set the reference to Vcc and the measurement to the internal 1.1V reference
+  #if defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
+    ADMUX = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  #elif defined (__AVR_ATtiny24__) || defined(__AVR_ATtiny44__) || defined(__AVR_ATtiny84__)
+    ADMUX = _BV(MUX5) | _BV(MUX0);
+  #elif defined (__AVR_ATtiny25__) || defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__)
+    ADMUX = _BV(MUX3) | _BV(MUX2);
+  #else
+    ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  #endif  
+
+  delay(2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Start conversion
+  while (bit_is_set(ADCSRA,ADSC)); // measuring
+
+  uint8_t low  = ADCL; // must read ADCL first - it then locks ADCH  
+  uint8_t high = ADCH; // unlocks both
+
+  long result = (high<<8) | low;
+
+  result = 1084380L / result; // Calculate Vcc (in mV); Vref = 1,06V calibrated
+  // 1084380L = 1.06*1023*1000
+  return result; // Vcc in millivolts
 }
