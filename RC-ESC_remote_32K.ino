@@ -1623,7 +1623,7 @@ byte floatToDigits(float input)
     numberF *= -1;
   }
   float power = log(numberF) / log(10);
-  if (power > 0 && power < 1) power = 1;
+  if (power > 0 && power < 1) power = 1; /// check this....
   floatPower = (byte) constrain(power, 0, 128);
   Serial.println(numberF,6);
   i = floatPrecision;
@@ -1641,7 +1641,7 @@ byte floatToDigits(float input)
   uint32_t number = numberF;
   Serial.println(number);
   i = DIGITS_LENGTH - 1;
-  if (power < 0) i++;
+  // if (power < 0) i++; this causes trouble
   while (number > 0 && i > 1)
   {
     digits[i] = number % 10;
@@ -1654,9 +1654,11 @@ byte floatToDigits(float input)
     if (digits[i] > 0) break;
     i++;
   }
-  if (power < 0) { digits[0]++; i--; }
+  // Refactor this for precision. So 0 is displayed as 0.000 if prec = 3
+  // Or 2.3 is displayed as 2.300
   digits[0] = DIGITS_LENGTH - i;
-  if (i == DIGITS_LENGTH) { digits[0] = 2; i--; i--; }  
+  if (power < 0) { digits[0]++; i--; }
+  if (i == DIGITS_LENGTH) { digits[0] = 2; i--; }  // Only happens if number == 0; ?
   Serial.println(power);
   Serial.println(digits[0]);
   /// return index to start reading from
