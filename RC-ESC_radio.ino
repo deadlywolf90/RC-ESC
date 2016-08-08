@@ -68,8 +68,12 @@ bool reset;
 volatile uint32_t lastWireInMillis = 0;
 uint32_t lastWireOutMillis = 0;
 uint32_t startTime = 0;
+uint32_t glowStart = 0;
+uint32_t glowWaitStart = 0;
 uint16_t engineRPM = 0;
 bool glowActive = false;
+bool manualGlow = false;
+bool glowWait = false;
 bool ESCfail = false;
 byte gMode = ESC_MODE_RUN;
 uint32_t lastRadioOut = 0;
@@ -85,12 +89,33 @@ bool programSent = false;
 bool programRequested = false;
 bool statusRequested = false;
 
+/* Bools in switches0
+ *  0 ESCswitch
+ *  1 programming
+ *  2 glowActive
+ *  3 safetyRelayState
+ *  4 headlight
+ *  5 neon
+ *  6 brakelight?
+ *  7 empty  */
+byte switches0 = 0;
+/* Bools in switches1
+ *  0 Oversteer detection
+ *  1 Oversteer correction
+ *  2 Understeer detection
+ *  3 Understeer correction
+ *  4 Veering detection
+ *  5 Veering correction
+ *  6 ABS
+ *  7 LED  */
+byte switches1 = B11111111;
+
 //////////////////////////////////////////////
 /// Sensitivity settings
 //////////////////////////////////////////////
 /// Input-related sensitivity:
 // the amount of jitter allowed while assuming centered controller
-uint8_t steeringDeadzone = 15;
+int steeringDeadzone = 15;
 // the sideways acceleration allowed when attempting to go straight
 float straightSensitivity = 0.1;
 // the avg wheel angle under which we assume straight motion
@@ -109,7 +134,7 @@ int oversteer_throttle_corr = -150;
 int understeer_throttle_corr = -25;
 int straightline_corr = 30;
 /// Geometry related settings:
-uint8_t wheelCircumference = 200; // in mm, if wheel diameter > 80 change to int
+int wheelCircumference = 200; // in mm, if wheel diameter > 80 change to int
 /// Sensitivity settings' limit will be implemented by the other arduino, if any
 /// End of sensitivity settings ////
 
@@ -118,7 +143,9 @@ EasyTransferI2C easyTransferOut; /// for setting values of ESC
 
 struct SEND_SETTINGS_STRUCTURE{ /// for setting values of ESC
   // variables have the same meaning as in ESC
-  uint8_t steeringDeadzone;
+  byte switches0;
+  byte switches1;
+  int steeringDeadzone;
   float straightSensitivity;
   float ESC_deadzone; 
   int brake_deadzone;
@@ -130,7 +157,7 @@ struct SEND_SETTINGS_STRUCTURE{ /// for setting values of ESC
   int oversteer_throttle_corr;
   int understeer_throttle_corr;
   int straightline_corr;
-  uint8_t wheelCircumference;
+  int wheelCircumference;
   uint8_t gMode;
   uint8_t engine_throttle_corr;
 };
@@ -138,6 +165,7 @@ struct SEND_SETTINGS_STRUCTURE{ /// for setting values of ESC
 struct RECEIVE_DATA_STRUCTURE{ /// for receiving telemetry data from other arduino
   uint8_t state;
   uint8_t gMode;
+  bool glow;
   float dTrainSpeed;
 };
 
@@ -154,10 +182,10 @@ struct RADIO_DATA_OUT {
 };
 
 struct RADIO_DATA_IN_0 {
-  bool ESCswitch;
-  bool programming;
+  byte switches0;
+  byte switches1;
   /// settings:
-  uint8_t steeringDeadzone;
+  int steeringDeadzone;
   float straightSensitivity;
   float ESC_deadzone; 
   int brake_deadzone;
@@ -173,7 +201,7 @@ struct RADIO_DATA_IN_1 {
   int oversteer_throttle_corr;
   int understeer_throttle_corr;
   int straightline_corr;
-  uint8_t wheelCircumference;
+  int wheelCircumference;
   uint8_t gMode;
   uint8_t engine_throttle_corr;
   uint8_t code;
@@ -196,6 +224,9 @@ uint8_t radioStatus;
 
 #define R_CODE_0 122
 #define R_CODE_1 195
+
+#define GLOW_TIME 3000
+#define GLOW_WAIT 2000
 
 void setup() 
 {    
@@ -234,24 +265,12 @@ void setup()
   digitalWrite(ESC_RESET_PIN, HIGH);
   digitalWrite(GLOW_LED_PIN, LOW);
   digitalWrite(SAFETY_RELAY_LED_PIN, LOW);
-
-  /// Just for fun and test:
-  analogWrite(NEON_PIN,0);
-  analogWrite(LIGHT_PIN, 0);
-  delay(1000);
-  for (byte i = 0; i < 255; i++)
-  {
-    analogWrite(NEON_PIN,i);
-    analogWrite(LIGHT_PIN,i);
-    delay(4);
-  }
-  analogWrite(NEON_PIN,255);
-  analogWrite(LIGHT_PIN,255);
-  /// Fun over
-  
+ 
   easyTransferIn.begin(details(rxdata), &Wire);
   easyTransferOut.begin(details(txdata), &Wire);  
-
+  
+  txdata.switches0 = switches0;
+  txdata.switches1 = switches1;
   txdata.steeringDeadzone = steeringDeadzone;
   txdata.straightSensitivity = straightSensitivity;
   txdata.ESC_deadzone = ESC_deadzone; 
@@ -353,6 +372,13 @@ void loop()
 
       radioDataOut.state = rxdata.state;
       radioDataOut.dTrainSpeed = rxdata.dTrainSpeed;      
+      if (rxdata.glow) 
+      {                 
+        if (!manualGlow) { rxdata.glow = false; }
+        manualGlow = true; 
+        glowWait = true; 
+        glowWaitStart = commonMillis;
+      }
 
       gMode = rxdata.gMode;
     }
@@ -379,8 +405,51 @@ void loop()
       }
     }
 
+    
+    if ((commonMillis - glowStart) > GLOW_TIME)
+    {
+      digitalWrite(GLOW_RELAY_PIN,LOW);
+      digitalWrite(GLOW_LED_PIN,LOW);
+      glowActive = false;
+    }
+    if (manualGlow)
+    {
+      if (glowActive || rxdata.glow)
+      {
+        digitalWrite(GLOW_RELAY_PIN,LOW);
+        digitalWrite(GLOW_LED_PIN,LOW);
+        glowActive = false;
+        manualGlow = false;
+        glowWait = false;
+      }      
+    }
+    if (manualGlow)
+    {      
+      if (glowWait)
+      {
+        if ((commonMillis - glowWaitStart) > GLOW_WAIT)
+        {
+          glowWait = false;
+        }
+        else
+        {
+          // A good way to async flash LEDs :)
+          bool state = (commonMillis - glowWaitStart) / 100 % 2;
+          digitalWrite(GLOW_LED_PIN,state);
+        }
+      }
+      else
+      {
+        digitalWrite(GLOW_RELAY_PIN,HIGH);
+        digitalWrite(GLOW_LED_PIN,HIGH);
+        glowStart = commonMillis;
+        glowActive = true;      
+        manualGlow = false;
+      }
+      
+    }
     /// TODO: delete or comment out, if manual glow is not needed anymore
-/*    if (digitalRead(MANUAL_GLOW_PIN) == HIGH)
+    /*if (digitalRead(MANUAL_GLOW_PIN) == LOW)
     {
       digitalWrite(GLOW_RELAY_PIN,HIGH);
       digitalWrite(GLOW_LED_PIN,HIGH);
@@ -391,13 +460,15 @@ void loop()
       digitalWrite(GLOW_RELAY_PIN,LOW);
       digitalWrite(GLOW_LED_PIN,LOW);
       glowActive = false;
-    } */   
+    }*/
     
     
     
     
     if (remoteProgram && radioStatus == R_STAT_ACK_1)
     {
+      txdata.switches0 = switches0;
+      txdata.switches1 = switches1;
       txdata.steeringDeadzone = steeringDeadzone;
       txdata.straightSensitivity = straightSensitivity;
       txdata.ESC_deadzone = ESC_deadzone; 
@@ -461,6 +532,17 @@ void loop()
       }      
     }    
   }
+  /*
+  if (digitalRead(NEON_PIN) != !readBool(&switches0, 4)) // lightstate != switchstate
+  {
+    switchLight(NEON_PIN, readBool(&switches0, 5));
+  }
+  if (digitalRead(LIGHT_PIN) != !readBool(&switches0, 4)) // lightstate != switchstate
+  {
+    switchLight(LIGHT_PIN, readBool(&switches0, 4));
+  }
+  */
+  
   /* Battery measurement unrelated to modes, but should not happen when glowing,
      because the current draw of the glow plug might drop voltage */
   if (!glowActive && commonMillis - lastBatteryMillis > 500)
@@ -510,7 +592,7 @@ void loop()
     }
     lastRadioOut = commonMillis;
   }
-
+  
   if(radio.available())
   {        
     if (radioStatus == R_STAT_READY)
@@ -524,8 +606,13 @@ void loop()
       if (radioDataIn0.code == R_CODE_0)
       {
         Serial.println("PACKET0!"); 
-        ESCswitch = radioDataIn0.ESCswitch;      
-        remoteProgram = radioDataIn0.programming;
+        switches0 = radioDataIn0.switches0;
+        switches1 = radioDataIn0.switches1; 
+        ESCswitch = readBool(&switches0, 0);      
+        remoteProgram = readBool(&switches0, 1);
+        /// Set lights, make sophisticated later :D
+        digitalWrite(LIGHT_PIN,!readBool(&switches0, 4));
+        digitalWrite(NEON_PIN,!readBool(&switches0, 5));
         if (remoteProgram)
         {
           steeringDeadzone = radioDataIn0.steeringDeadzone; 
@@ -563,7 +650,7 @@ void loop()
           engine_throttle_corr = radioDataIn1.engine_throttle_corr;
           radioStatus = R_STAT_ACK_1;
           Serial.println("PACKET1 ACK");
-          if (true)
+          if (false)
           {
             Serial.println(steeringDeadzone); 
             Serial.println(straightSensitivity); 
@@ -582,8 +669,35 @@ void loop()
           }
         }
       }
-    }
+    }    
   }
+}
+
+void switchLight(int pin, bool state)
+{
+  digitalWrite(pin, !state);
+  byte i = 255;
+  if (state)
+  {
+    i = 255;
+    while (i >= 0)
+    {
+      analogWrite(pin,i);
+      delay(4);
+      i--;
+    }    
+  }
+  else
+  {
+    i = 0;
+    while (i < 255)
+    {
+      analogWrite(pin,i);
+      delay(4);
+      i++;
+    }  
+  }
+  digitalWrite(pin, state);
 }
 
 void receiveEvent(int howMany)
@@ -614,6 +728,52 @@ void requestProgram()
   Wire.onRequest(requestStatus); 
 }
 
+void flashLights(int pin, byte flashes, int time1, int time2, bool startState){
+  bool state = digitalRead(pin);
+  for (byte i = 0; i < flashes; i++)
+  {
+    digitalWrite(pin, startState);
+    delay(time1);
+    digitalWrite(pin, !startState);
+    delay(time2);
+  }
+  digitalWrite(pin, state);
+}
+
+void flashLights(int pin, byte flashes, int time1, int time2){
+  flashLights(pin, flashes, time1, time2, digitalRead(pin));
+}
+
+bool readBool(byte * data, byte index) 
+{
+  // Bits from left to right numbered from 0 to 7
+  byte mask = B00000001 << (7 - index);
+  return mask & *data;
+}
+
+byte writeBool(byte * data, byte index, bool input) 
+{
+  byte mask = B00000001 << (7 - index);
+  if (input)
+  {    
+    *data = mask | *data;
+  }
+  else
+  { 
+    // This makes a mask where the bit to set is 0, rest is 1
+    mask = B11111111 ^ mask;
+    *data = mask & *data;
+  }
+  return *data;
+}
+
+byte flipBool(byte * data, byte index)
+{
+   byte mask = B00000001 << (7 - index);
+   *data = mask ^ *data;
+   return *data;
+}
+
 long readVcc() {
   // Read 1.1V reference against AVcc
   // set the reference to Vcc and the measurement to the internal 1.1V reference
@@ -640,3 +800,4 @@ long readVcc() {
   // 1084380L = 1.06*1023*1000
   return result; // Vcc in millivolts
 }
+
