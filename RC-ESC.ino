@@ -286,7 +286,7 @@ EasyTransferI2C easyTransferOut; /// for sending telemetry data to other arduino
 //////////////////////////////////////////////
 /// Input-related sensitivity:
 // the amount of jitter allowed while assuming centered controller
-uint8_t steeringDeadzone = 15;
+int steeringDeadzone = 15;
 // the sideways acceleration allowed when attempting to go straight
 float straightSensitivity = 0.1;
 // the avg wheel angle under which we assume straight motion
@@ -305,7 +305,7 @@ int oversteer_throttle_corr = -150;
 int understeer_throttle_corr = -25;
 int straightline_corr = 30;
 /// Geometry related settings:
-uint8_t wheelCircumference = 200; // in mm, if wheel diameter > 80 change to int
+int wheelCircumference = 200; // in mm, if wheel diameter > 80 change to int
 /// Sensitivity settings' limit will be implemented by the other arduino, if any
 /// End of sensitivity settings ////
 byte engine_throttle_corr = 0;
@@ -314,9 +314,32 @@ volatile float dTrainSpeed = 0;
 uint16_t engineRPM; 
 /// end of telemetry data
 
+/* Bools in switches0
+ *  0 ESCswitch
+ *  1 programming
+ *  2 glowActive
+ *  3 safetyRelayState
+ *  4 headlight
+ *  5 neon
+ *  6 brakelight?
+ *  7 empty  */
+byte switches0 = 0;
+/* Bools in switches1
+ *  0 Oversteer detection
+ *  1 Oversteer correction
+ *  2 Understeer detection
+ *  3 Understeer correction
+ *  4 Veering detection
+ *  5 Veering correction
+ *  6 ABS
+ *  7 LED  */
+byte switches1 = B11111111;
+
 struct RECEIVE_SETTINGS_STRUCTURE{ /// for setting values of ESC
   // variables have the same meaning as above
-  uint8_t steeringDeadzone;
+  byte switches0;
+  byte switches1;
+  int steeringDeadzone;
   float straightSensitivity;
   float ESC_deadzone; 
   int brake_deadzone;
@@ -328,7 +351,7 @@ struct RECEIVE_SETTINGS_STRUCTURE{ /// for setting values of ESC
   int oversteer_throttle_corr;
   int understeer_throttle_corr;
   int straightline_corr;
-  uint8_t wheelCircumference;
+  int wheelCircumference;
   uint8_t gMode;
   uint8_t engine_throttle_corr;
 };
@@ -336,6 +359,7 @@ struct RECEIVE_SETTINGS_STRUCTURE{ /// for setting values of ESC
 struct SEND_DATA_STRUCTURE{ /// for sending telemetry data to other arduino
   uint8_t state;
   uint8_t gMode;
+  bool glow;
   float dTrainSpeed;
 };
 
@@ -652,6 +676,9 @@ void loop()
   // when program button is pushed:
   if (false == digitalRead(PROGRAM_PIN) && gMode != MODE_FULL_PROGRAM)
   {
+    txdata.glow = true;
+    delay(350);
+    /*
     // give 10 seconds to program
     gMode = MODE_QUICK_PROGRAM;
 
@@ -689,6 +716,7 @@ void loop()
 
     // Take new sensitivity and decay readings for quick program and full program modes here
     readSettings();
+    */
   }
 
   if (gMode == MODE_FULL_PROGRAM)
@@ -885,27 +913,33 @@ void loop()
       if (state == ST_OVERSTEER) { unstable = true; }
       if (true)  /// TODO: condition for speed 
       {
-        if (abs(accelerationX) < (abs(normAccelerationX) - understeerXdiff) || accelerationY > (normAccelerationY + understeerYdiff))
-        { // i.e. if acceleration is smaller than normal or
-          // acceleration points more to the front of the car than calculated
-          if (turn != TURN_NONE)
-          {
-            state = ST_UNDERSTEER;
-            unstable = true;
+        if (readBool(&switches1, 2)) // Understeer detection is on
+        {
+          if (abs(accelerationX) < (abs(normAccelerationX) - understeerXdiff) || accelerationY > (normAccelerationY + understeerYdiff))
+          { // i.e. if acceleration is smaller than normal or
+            // acceleration points more to the front of the car than calculated
+            if (turn != TURN_NONE)
+            {
+              state = ST_UNDERSTEER;
+              unstable = true;
+            }
           }
         }
-        
-        if (abs(yawA) > (abs(normYaw) + oversteer_yaw_difference))
+
+        if (readBool(&switches1, 0))
         {
-          state = ST_OVERSTEER;
-          unstable = true;
-          if (yawA > 0)
+          if (abs(yawA) > (abs(normYaw) + oversteer_yaw_difference))
           {
-            oversteer_direction = OST_RIGHT;
-          }
-          if (yawA < 0)
-          {
-            oversteer_direction = OST_LEFT;
+            state = ST_OVERSTEER;
+            unstable = true;
+            if (yawA > 0)
+            {
+              oversteer_direction = OST_RIGHT;
+            }
+            if (yawA < 0)
+            {
+              oversteer_direction = OST_LEFT;
+            }
           }
         }
         if (yawA * oversteer_last_direction < 0 && abs(yawA) > oversteer_yaw_release)
@@ -932,7 +966,7 @@ void loop()
       if (state == ST_BALANCED)
       {
         /// What to do with steering:
-        if (turn == TURN_NONE)
+        if (turn == TURN_NONE && readBool(&switches1, 4))
         {
           if (accelerationX > straightSensitivity) /// deviating to the right
           {
@@ -958,7 +992,7 @@ void loop()
         if (!brake_blocked) { unThrottleOut = unThrottleIn; }
         unThrottleOut -= engine_throttle_corr;
       }
-      else if (state == ST_OVERSTEER)
+      else if (state == ST_OVERSTEER && readBool(&switches1, 1))
       {
         int8_t corrInt = 0;
         float corrFloat = 0;
@@ -978,7 +1012,7 @@ void loop()
         unThrottleOut = unThrottleIn - oversteer_throttle_corr;
         unThrottleOut = constrain(unThrottleOut, RC_MIN, RC_MAX);
       }
-      else if (state == ST_UNDERSTEER)
+      else if (state == ST_UNDERSTEER && readBool(&switches1, 3))
       {
         /// throttleMax means full braking on this car
         unThrottleOut = unThrottleOut - understeer_throttle_corr;
@@ -1001,7 +1035,7 @@ void loop()
       {
         if ((ulMillis - lastSpeedUpdateMillis) > lastSpeedInterval)
         {
-          if (dTrainSpeed > 0) { brake_blocked = true; }
+          if (dTrainSpeed > 0 && readBool(&switches1, 6)) { brake_blocked = true; }
           blockedThrottleOut = unThrottleOut;
         }
         if (brake_blocked)
@@ -1090,6 +1124,8 @@ void loop()
       if (easyTransferIn.receiveData())    
       {
         Wire.releaseBus(); /// Need this? (= twi_releaseBus)
+        switches0 = rxdata.switches0;
+        switches1 = rxdata.switches1;
         steeringDeadzone = rxdata.steeringDeadzone; 
         straightSensitivity = rxdata.straightSensitivity;
         ESC_deadzone = rxdata.ESC_deadzone;  
@@ -1135,30 +1171,39 @@ void loop()
 
   bUpdateFlags = 0;
 
-  if (state == ST_OVERSTEER)
+  if (readBool(&switches1, 7))
   {
-    // yel0:
-    digitalWrite(ERROR_INDICATOR_PIN, HIGH);    
-    digitalWrite(INFORMATION_INDICATOR_PIN, HIGH);
-    digitalWrite(GYRO_LED_PIN, LOW);
-  }
-  else if (state == ST_UNDERSTEER)
-  {
-    // purple:
-    digitalWrite(ERROR_INDICATOR_PIN, HIGH);    
-    digitalWrite(INFORMATION_INDICATOR_PIN, LOW);
-    digitalWrite(GYRO_LED_PIN, HIGH);
-  }
-  else if (state == ST_ROLLED)
-  {
-    // blue:
-    digitalWrite(ERROR_INDICATOR_PIN, LOW);    
-    digitalWrite(INFORMATION_INDICATOR_PIN, LOW);
-    digitalWrite(GYRO_LED_PIN, HIGH);
+    if (state == ST_OVERSTEER)
+    {
+      // yel0:
+      digitalWrite(ERROR_INDICATOR_PIN, HIGH);    
+      digitalWrite(INFORMATION_INDICATOR_PIN, HIGH);
+      digitalWrite(GYRO_LED_PIN, LOW);
+    }
+    else if (state == ST_UNDERSTEER)
+    {
+      // purple:
+      digitalWrite(ERROR_INDICATOR_PIN, HIGH);    
+      digitalWrite(INFORMATION_INDICATOR_PIN, LOW);
+      digitalWrite(GYRO_LED_PIN, HIGH);
+    }
+    else if (state == ST_ROLLED)
+    {
+      // blue:
+      digitalWrite(ERROR_INDICATOR_PIN, LOW);    
+      digitalWrite(INFORMATION_INDICATOR_PIN, LOW);
+      digitalWrite(GYRO_LED_PIN, HIGH);
+    }
+    else
+    {
+      animateIndicatorsAccordingToMode(gMode, ulMillis);
+    }
   }
   else
   {
-    animateIndicatorsAccordingToMode(gMode, ulMillis);
+      digitalWrite(ERROR_INDICATOR_PIN, LOW);    
+      digitalWrite(INFORMATION_INDICATOR_PIN, LOW);
+      digitalWrite(GYRO_LED_PIN, LOW);
   }
 
   if (gMode != MODE_REMOTE_PROGRAM)
@@ -1168,6 +1213,7 @@ void loop()
     txdata.dTrainSpeed = dTrainSpeed;
     
     easyTransferOut.sendData(0xA3); 
+    txdata.glow = false;
   }
   if (programReceived) // TODO: flash brakelights to indicate ready
   {
@@ -1178,6 +1224,7 @@ void loop()
     programPrepared = false;
     programRequested = false;
     programReceived = false;
+    // flashLights(INFORMATION_INDICATOR_PIN, 4, 125, 125, true);
   }
 }
 
@@ -1382,3 +1429,46 @@ void receiveSettings(int howMany)
 {
  
 }
+
+bool readBool(byte * data, byte index) 
+{
+  // Bits from left to right numbered from 0 to 7
+  byte mask = B00000001 << (7 - index);
+  return mask & *data;
+}
+
+byte writeBool(byte * data, byte index, bool input) 
+{
+  byte mask = B00000001 << (7 - index);
+  if (input)
+  {    
+    *data = mask | *data;
+  }
+  else
+  { 
+    // This makes a mask where the bit to set is 0, rest is 1
+    mask = B11111111 ^ mask;
+    *data = mask & *data;
+  }
+  return *data;
+}
+
+byte flipBool(byte * data, byte index)
+{
+   byte mask = B00000001 << (7 - index);
+   *data = mask ^ *data;
+   return *data;
+}
+
+void flashLights(int pin, byte flashes, int time1, int time2, bool startState){
+  bool state = digitalRead(pin);
+  for (byte i = 0; i < flashes; i++)
+  {
+    digitalWrite(pin, startState);
+    delay(time1);
+    digitalWrite(pin, !startState);
+    delay(time2);
+  }
+  digitalWrite(pin, state);
+}
+
