@@ -637,8 +637,170 @@ void loop()
       {
         /// TODO: Display current values for submenu items!
         /// Idea: modify the click action tree, to write values to lcd_buf
-        
-        
+        lcd_buf.clearLine(2);
+		byte cursor = 0;
+		bool isFloat = false;
+		
+        if (mainMenuIndex == 0) // Oversteer settings
+        {  
+          if (subMenuIndex == 0) // On-trigger yaw
+          {     
+            inputFloatAdress = &radioDataOut0.oversteer_yaw_difference;     
+            floatToEdit = *inputFloatAdress;
+            numChangeHeader = F("D/s^2: ");
+            numChangeHeader.replace('D',(char) B11011111);
+            numChangeHeaderSize = 7;
+            floatPrecision = 3;
+			isFloat = true;
+          }
+          if (subMenuIndex == 1) // Off-trigger yaw
+          {        
+            inputFloatAdress = &radioDataOut0.oversteer_yaw_release;     
+            floatToEdit = *inputFloatAdress;
+            numChangeHeader = F("D/s^2: ");
+            numChangeHeader.replace('D',(char) B11011111);
+            numChangeHeaderSize = 7;
+            floatPrecision = 3;
+			isFloat = true;
+          }
+          if (subMenuIndex == 2) // Steering correction
+          {              
+            inputFloatAdress = &radioDataOut1.oversteer_steering_multi;     
+            floatToEdit = *inputFloatAdress;
+            numChangeHeader = F("multi: ");
+            numChangeHeaderSize = 7;
+            floatPrecision = 3;
+			isFloat = true;
+          }
+          if (subMenuIndex == 3) // Throttle correction
+          {          
+            inputIntAdress = &radioDataOut1.oversteer_throttle_corr;      
+            numberToEdit = *inputIntAdress;
+            numChangeHeader = F("corr: ");
+            numChangeHeaderSize = 6;
+          }
+          if (subMenuIndex == 4) // Detection on/off
+          {
+            if (readBool(&switches1, 0)) {lcd_buf.print("ON "); }
+            else { lcd_buf.print("OFF "); }
+          }
+          if (subMenuIndex == 5) // Correction on/off
+          {
+            if (readBool(&switches1, 1)) {lcd_buf.print("ON "); }
+            else { lcd_buf.print("OFF "); }
+          }              
+        }
+        else if (mainMenuIndex == 1) // Understeer settings
+        {          
+          if (subMenuIndex == 0) // X-axis trigger acc. 
+          {                
+            inputFloatAdress = &radioDataOut1.understeerXdiff;     
+            floatToEdit = *inputFloatAdress;
+            numChangeHeader = F("m/s^2: ");
+            numChangeHeaderSize = 7;
+            floatPrecision = 4;
+			isFloat = true;
+          }          
+          if (subMenuIndex == 1) // Y-axis trigger acc. 
+          {                   
+            inputFloatAdress = &radioDataOut1.understeerYdiff;     
+            floatToEdit = *inputFloatAdress;
+            numChangeHeader = F("m/s^2: ");
+            numChangeHeaderSize = 7;
+            floatPrecision = 4;
+			isFloat = true;
+          }         
+          if (subMenuIndex == 2) // Understeer throttle corr.
+          {                   
+            inputIntAdress = &radioDataOut1.understeer_throttle_corr;      
+            numberToEdit = *inputIntAdress;
+            numChangeHeader = F("corr: ");
+            numChangeHeaderSize = 6;
+          }
+          if (subMenuIndex == 3) // Detection on/off
+          {
+            if (readBool(&switches1, 2)) {lcd_buf.print("ON "); }
+            else { lcd_buf.print("OFF "); }
+          }
+          if (subMenuIndex == 4) // Correction on/off
+          {
+            if (readBool(&switches1, 3)) {lcd_buf.print("ON "); }
+            else { lcd_buf.print("OFF "); }
+          }    
+        } 
+        else if (mainMenuIndex == 2) // Veering settings
+        {
+          if (subMenuIndex == 0) // Trigger acceleration
+          {                   
+            inputFloatAdress = &radioDataOut0.straightSensitivity;     
+            floatToEdit = *inputFloatAdress;
+            numChangeHeader = F("m/s^2: ");
+            numChangeHeaderSize = 7;
+            floatPrecision = 4;
+			isFloat = true;
+          }          
+          if (subMenuIndex == 1) // Correction factor 
+          {                
+            inputIntAdress = &radioDataOut1.straightline_corr;      
+            numberToEdit = *inputIntAdress;
+            numChangeHeader = F("corr: ");
+            numChangeHeaderSize = 6;
+          }
+          if (subMenuIndex == 2) // Detection on/off
+          {
+            if (readBool(&switches1, 4)) {lcd_buf.print("ON "); }
+            else { lcd_buf.print("OFF "); }
+          }
+          if (subMenuIndex == 3) // Correction on/off
+          {
+            if (readBool(&switches1, 4)) {lcd_buf.print("ON "); }
+            else { lcd_buf.print("OFF "); }
+          }
+        }
+        else if (mainMenuIndex == 3) // Other ESC settings
+        {          
+          if (subMenuIndex == 0) // ESC deadzone  
+          {          
+            // FLOAT specified in degrees. calculate to rad!
+            ESC_deadzone_deg = radToDeg(radioDataOut0.ESC_deadzone);
+            inputFloatAdress = &ESC_deadzone_deg;     
+            floatToEdit = *inputFloatAdress;
+            numChangeHeader = F("deg: ");
+            numChangeHeaderSize = 5;
+            floatPrecision = 3;
+			isFloat = true;
+          }          
+          if (subMenuIndex == 1) // Steering deadzone
+          {           
+            inputIntAdress = &radioDataOut0.steeringDeadzone;      
+            numberToEdit = *inputIntAdress;
+            numChangeHeader = F("corr: ");
+            numChangeHeaderSize = 6;
+          }          
+          if (subMenuIndex == 2) // Brake deadzone  INT
+          {              
+            inputIntAdress = &radioDataOut0.brake_deadzone;      
+            numberToEdit = *inputIntAdress;
+            numChangeHeader = F("corr: ");
+            numChangeHeaderSize = 6;
+          }           
+          if (subMenuIndex == 3) // ABS on/off 
+          {
+            if (readBool(&switches1, 6)) {lcd_buf.print("ON "); }
+            else { lcd_buf.print("OFF "); }
+          }       
+          // 4Wheel size          
+          // 5Top speed limiter  INT
+        }
+		int length = 0;
+        if (isFloat)
+		{
+			
+		}
+		else
+		{
+			
+		}
       }
     }
     if (encoderBtnClicked)
@@ -821,7 +983,9 @@ void loop()
           }
           if (subMenuIndex == 3) // Correction on/off
           {
-            flipBool(&switches1, 5);
+            flipBool(&switches1, 4);
+			if (readBool(&switches1, 4)) {lcd_buf.print("ON "); }
+            else { lcd_buf.print("OFF "); }
           }
         }
         else if (mainMenuIndex == 3) // Other ESC settings
@@ -1614,6 +1778,8 @@ byte numberToDigits(int32_t input)
 
 byte floatToDigits(float input)
 {
+  /// TODO: check if passing an int will work here, 
+  /// because then all the int stuff can be deleted
   float numberF = input;
   byte i = 0;  
   for (; i < DIGITS_LENGTH; i++) digits[i] = 0;
